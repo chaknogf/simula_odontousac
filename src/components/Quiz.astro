@@ -1,0 +1,690 @@
+---
+import { sections } from '../data/questions';
+---
+
+<div class="app">
+  <!-- ======================= PANTALLA DE INICIO ======================= -->
+  <section id="start-screen" class="screen">
+    <header class="hero">
+      <span class="badge">FOUSAC 2026</span>
+      <h1>Simulador de Admisión</h1>
+      <p class="sub">Facultad de Odontología · USAC · Guía temática 2026</p>
+    </header>
+
+    <div class="card">
+      <h2 class="card-title">Modo de evaluación</h2>
+      <div id="modes" class="modes">
+        <button class="mode on" data-mode="completo" type="button">
+          <b>Examen completo</b>
+          <span>Todas las subpruebas juntas</span>
+        </button>
+        <button class="mode" data-mode="subprueba" type="button">
+          <b>Subprueba individual</b>
+          <span>Una sola área, tiempo oficial</span>
+        </button>
+        <button class="mode" data-mode="practica" type="button">
+          <b>Práctica libre</b>
+          <span>Sin presión de tiempo</span>
+        </button>
+      </div>
+
+      <h2 class="card-title">Subpruebas</h2>
+      <div id="section-chips" class="chips"></div>
+      <div class="chips-actions">
+        <button id="select-all" class="link-btn" type="button">Seleccionar todas</button>
+        <button id="select-none" class="link-btn" type="button">Ninguna</button>
+      </div>
+
+      <h2 class="card-title">Cronómetro</h2>
+      <div id="timer-modes" class="timer-modes">
+        <label class="radio">
+          <input type="radio" name="timer" value="auto" checked />
+          <span>Automático (tiempo oficial)</span>
+        </label>
+        <label class="radio">
+          <input type="radio" name="timer" value="off" />
+          <span>Sin cronómetro</span>
+        </label>
+        <label class="radio">
+          <input type="radio" name="timer" value="custom" />
+          <span>Personalizado</span>
+          <input type="number" id="custom-min" min="1" max="240" value="60" disabled />
+          <span>min</span>
+        </label>
+      </div>
+      <p id="timer-hint" class="hint"></p>
+
+      <button id="start-btn" class="btn primary big" type="button">Comenzar examen</button>
+      <p class="hint kbd-hint">
+        Atajos: <kbd>1</kbd>–<kbd>4</kbd> o <kbd>A</kbd>–<kbd>D</kbd> para responder · <kbd>←</kbd> <kbd>→</kbd> para
+        navegar · <kbd>Enter</kbd> para avanzar
+      </p>
+    </div>
+  </section>
+
+  <!-- ========================= PANTALLA DE EXAMEN ========================= -->
+  <section id="quiz-screen" class="screen hidden">
+    <div class="topbar">
+      <div class="progress"><div id="progress-bar" class="progress-bar"></div></div>
+      <div class="topbar-row">
+        <span id="progress-text" class="progress-text">1 / 44</span>
+        <span id="timer" class="timer">60:00</span>
+      </div>
+      <div id="tabs" class="tabs"></div>
+    </div>
+
+    <div id="question" class="question"></div>
+    <div id="options" class="options"></div>
+    <div id="explanation" class="explanation hidden"></div>
+
+    <div class="footer-bar">
+      <button id="prev-btn" class="btn ghost" type="button">← Anterior</button>
+      <button id="finish-btn" class="btn danger" type="button">Finalizar y corregir</button>
+      <button id="next-btn" class="btn primary" type="button">Siguiente →</button>
+    </div>
+  </section>
+
+  <!-- ========================= PANTALLA DE RESULTADOS ========================= -->
+  <section id="results-screen" class="screen hidden">
+    <div class="results-card card">
+      <h2>Resultados</h2>
+      <div class="ring-wrap">
+        <svg viewBox="0 0 120 120" class="ring" aria-hidden="true">
+          <circle class="ring-bg" cx="60" cy="60" r="52" />
+          <circle class="ring-fg" id="ring-fg" cx="60" cy="60" r="52" />
+        </svg>
+        <div class="ring-label">
+          <b id="score-pct">0%</b>
+          <span id="score-frac">0/44</span>
+        </div>
+      </div>
+      <p id="score-msg" class="score-msg"></p>
+      <div id="breakdown" class="breakdown"></div>
+      <div class="results-actions">
+        <button id="retry-btn" class="btn primary" type="button">Reintentar</button>
+        <button id="home-btn" class="btn ghost" type="button">Volver al inicio</button>
+      </div>
+    </div>
+    <h3 class="review-title">Repaso de preguntas</h3>
+    <div id="review" class="review"></div>
+  </section>
+</div>
+
+<script>
+  import { sections } from '../data/questions';
+
+  interface PreparedQuestion {
+    category: string;
+    text: string;
+    options: string[];
+    correct: number;
+    explanation: string;
+    figure?: string;
+    optionFigures?: string[];
+  }
+
+  type Mode = 'completo' | 'subprueba' | 'practica';
+  type TimerMode = 'auto' | 'off' | 'custom';
+  type Phase = 'start' | 'quiz' | 'results';
+
+  const LETTERS = ['a', 'b', 'c', 'd', 'e', 'f'];
+  const RING_CIRC = 2 * Math.PI * 52;
+
+  function $<T extends HTMLElement = HTMLElement>(sel: string): T {
+    const el = document.querySelector<T>(sel);
+    if (!el) throw new Error(`No se encontró el elemento: ${sel}`);
+    return el;
+  }
+
+  function shuffle<T>(arr: readonly T[]): T[] {
+    const a = [...arr];
+    for (let i = a.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+  }
+
+  function escapeHtml(s: string): string {
+    return s
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function fmt(s: number): string {
+    const t = Math.max(0, s);
+    return `${String(Math.floor(t / 60)).padStart(2, '0')}:${String(t % 60).padStart(2, '0')}`;
+  }
+
+  /* ----------------------------- Referencias DOM ----------------------------- */
+  const startScreen = $('#start-screen');
+  const quizScreen = $('#quiz-screen');
+  const resultsScreen = $('#results-screen');
+  const modesEl = $('#modes');
+  const chipsEl = $('#section-chips');
+  const selectAllBtn = $('#select-all');
+  const selectNoneBtn = $('#select-none');
+  const timerModesEl = $('#timer-modes');
+  const customMinInput = $('#custom-min') as HTMLInputElement;
+  const timerHint = $('#timer-hint');
+  const startBtn = $('#start-btn') as HTMLButtonElement;
+
+  const progressBar = $('#progress-bar');
+  const progressText = $('#progress-text');
+  const timerEl = $('#timer');
+  const tabsEl = $('#tabs');
+  const questionEl = $('#question');
+  const optionsEl = $('#options');
+  const explanationEl = $('#explanation');
+  const prevBtn = $('#prev-btn') as HTMLButtonElement;
+  const nextBtn = $('#next-btn') as HTMLButtonElement;
+  const finishBtn = $('#finish-btn') as HTMLButtonElement;
+
+  const ringFg = $('#ring-fg') as unknown as SVGCircleElement;
+  const scorePct = $('#score-pct');
+  const scoreFrac = $('#score-frac');
+  const scoreMsg = $('#score-msg');
+  const breakdownEl = $('#breakdown');
+  const retryBtn = $('#retry-btn') as HTMLButtonElement;
+  const homeBtn = $('#home-btn') as HTMLButtonElement;
+  const reviewEl = $('#review');
+
+  /* --------------------------------- Estado --------------------------------- */
+  let phase: Phase = 'start';
+  let mode: Mode = 'completo';
+  let timerMode: TimerMode = 'auto';
+  let customMinutes = 60;
+  let selected = new Set<string>(sections.map((s) => s.id));
+  let questions: PreparedQuestion[] = [];
+  let orders: number[][] = [];
+  let answers: (number | undefined)[] = [];
+  let current = 0;
+  let timeLeft = 0;
+  let timerEnabled = false;
+  let timerId: number | undefined;
+  let startTime = 0;
+
+  /* ------------------------------ Utilidades -------------------------------- */
+  function selectedSections() {
+    return sections.filter((s) => selected.has(s.id));
+  }
+
+  function autoMinutes(): number {
+    return selectedSections().reduce((a, s) => a + s.officialTime, 0);
+  }
+
+  function selectedCount(): number {
+    return selectedSections().reduce((a, s) => a + s.questions.length, 0);
+  }
+
+  /* --------------------------- Pantalla de inicio --------------------------- */
+  function renderStart() {
+    chipsEl.innerHTML = sections
+      .map((s) => {
+        const on = selected.has(s.id);
+        return `<button class="chip ${on ? 'on' : ''}" data-id="${s.id}" type="button" title="${escapeHtml(s.description)}">
+          <span>${escapeHtml(s.short)}</span><b>${s.questions.length} preg · ${s.officialTime} min</b>
+        </button>`;
+      })
+      .join('');
+
+    chipsEl.querySelectorAll('button').forEach((b) =>
+      b.addEventListener('click', () => {
+        const id = b.dataset.id!;
+        if (mode === 'subprueba') {
+          selected = new Set([id]);
+        } else if (selected.has(id)) {
+          selected.delete(id);
+        } else {
+          selected.add(id);
+        }
+        renderStart();
+      }),
+    );
+
+    const multi = mode !== 'subprueba';
+    selectAllBtn.style.display = multi ? '' : 'none';
+    selectNoneBtn.style.display = multi ? '' : 'none';
+
+    const n = selectedCount();
+    if (n === 0) {
+      startBtn.disabled = true;
+      startBtn.textContent = 'Selecciona al menos una subprueba';
+    } else {
+      startBtn.disabled = false;
+      startBtn.textContent = mode === 'subprueba' ? `Comenzar subprueba · ${n} preguntas` : `Comenzar · ${n} preguntas`;
+    }
+
+    updateTimerHint();
+  }
+
+  function updateTimerHint() {
+    if (timerMode === 'auto') {
+      const m = autoMinutes();
+      timerHint.textContent =
+        m > 0 ? `Duración oficial: ${m} minutos para ${selected.size} subprueba(s).` : 'Selecciona al menos una subprueba.';
+    } else if (timerMode === 'custom') {
+      timerHint.textContent = `Duración personalizada: ${customMinutes} minutos.`;
+    } else {
+      timerHint.textContent = 'Sin límite de tiempo.';
+    }
+  }
+
+  function syncTimerRadios() {
+    timerModesEl.querySelectorAll<HTMLInputElement>('input[name="timer"]').forEach((r) => {
+      r.checked = r.value === timerMode;
+    });
+    customMinInput.disabled = timerMode !== 'custom';
+  }
+
+  modesEl.querySelectorAll('button').forEach((b) =>
+    b.addEventListener('click', () => {
+      mode = b.dataset.mode as Mode;
+      modesEl.querySelectorAll('button').forEach((x) => x.classList.toggle('on', x === b));
+      timerMode = mode === 'practica' ? 'off' : 'auto';
+      syncTimerRadios();
+      renderStart();
+    }),
+  );
+
+  timerModesEl.querySelectorAll<HTMLInputElement>('input[name="timer"]').forEach((r) =>
+    r.addEventListener('change', () => {
+      timerMode = r.value as TimerMode;
+      customMinInput.disabled = timerMode !== 'custom';
+      updateTimerHint();
+    }),
+  );
+
+  customMinInput.addEventListener('input', () => {
+    const v = Number(customMinInput.value);
+    customMinutes = Number.isFinite(v) ? Math.max(1, Math.min(240, Math.round(v))) : 60;
+    updateTimerHint();
+  });
+
+  selectAllBtn.addEventListener('click', () => {
+    selected = new Set(sections.map((s) => s.id));
+    renderStart();
+  });
+
+  selectNoneBtn.addEventListener('click', () => {
+    selected.clear();
+    renderStart();
+  });
+
+  /* ------------------------------- Cronómetro -------------------------------- */
+  function startTimer() {
+    stopTimer();
+    if (!timerEnabled) {
+      timerEl.textContent = 'Sin cronómetro';
+      timerEl.classList.remove('low');
+      return;
+    }
+    timerEl.textContent = fmt(timeLeft);
+    timerEl.classList.toggle('low', timeLeft < 300);
+    timerId = window.setInterval(() => {
+      timeLeft--;
+      timerEl.textContent = fmt(timeLeft);
+      timerEl.classList.toggle('low', timeLeft < 300);
+      if (timeLeft <= 0) finishQuiz();
+    }, 1000);
+  }
+
+  function stopTimer() {
+    if (timerId !== undefined) {
+      clearInterval(timerId);
+      timerId = undefined;
+    }
+  }
+
+  /* ------------------------------ Inicio del examen -------------------------- */
+  function startQuiz() {
+    if (selected.size === 0) return;
+    questions = [];
+    for (const sec of selectedSections()) {
+      for (const q of shuffle(sec.questions)) {
+        questions.push({
+          category: sec.name,
+          text: q.text,
+          options: q.options,
+          correct: q.correct,
+          explanation: q.explanation,
+          figure: q.figure,
+          optionFigures: q.optionFigures,
+        });
+      }
+    }
+    orders = questions.map((q) => shuffle(q.options.map((_, i) => i)));
+    answers = new Array(questions.length).fill(undefined);
+    current = 0;
+    startTime = Date.now();
+
+    if (timerMode === 'off') {
+      timerEnabled = false;
+    } else {
+      timerEnabled = true;
+      timeLeft = (timerMode === 'custom' ? customMinutes : autoMinutes()) * 60;
+    }
+
+    phase = 'quiz';
+    startScreen.classList.add('hidden');
+    resultsScreen.classList.add('hidden');
+    quizScreen.classList.remove('hidden');
+    startTimer();
+    render();
+    window.scrollTo(0, 0);
+  }
+
+  /* -------------------------------- Renderizado ------------------------------ */
+  function render() {
+    const total = questions.length;
+    const answered = answers.filter((a) => a !== undefined).length;
+    progressBar.style.width = `${total ? (answered / total) * 100 : 0}%`;
+    progressText.textContent = `${current + 1} / ${total}`;
+    renderTabs();
+    renderQuestion();
+    renderOptions();
+    renderExplanation();
+    renderFooter();
+    animateCard();
+  }
+
+  function renderTabs() {
+    const cats: string[] = [];
+    for (const q of questions) if (!cats.includes(q.category)) cats.push(q.category);
+    tabsEl.innerHTML = cats
+      .map((cat) => {
+        const idxs = questions.map((q, i) => (q.category === cat ? i : -1)).filter((i) => i >= 0);
+        const done = idxs.filter((i) => answers[i] !== undefined).length;
+        const active = questions[current].category === cat;
+        return `<button class="tab ${active ? 'on' : ''}" data-cat="${escapeHtml(cat)}" type="button">${escapeHtml(cat)} · ${done}/${idxs.length}</button>`;
+      })
+      .join('');
+    tabsEl.querySelectorAll('button').forEach((b) =>
+      b.addEventListener('click', () => {
+        const cat = b.dataset.cat!;
+        let target = questions.findIndex((q, i) => q.category === cat && answers[i] === undefined);
+        if (target === -1) target = questions.findIndex((q) => q.category === cat);
+        if (target >= 0) {
+          current = target;
+          render();
+        }
+      }),
+    );
+  }
+
+  function renderQuestion() {
+    const q = questions[current];
+    questionEl.innerHTML = `
+      ${q.figure ? `<div class="fig-wrap">${q.figure}</div>` : ''}
+      <span class="q-cat">${escapeHtml(q.category)}</span>
+      <p class="q-text">${escapeHtml(q.text).replace(/\n/g, '<br>')}</p>
+    `;
+  }
+
+  function renderOptions() {
+    const q = questions[current];
+    const order = orders[current];
+    const sel = answers[current];
+    const answered = sel !== undefined;
+    const hasFig = q.optionFigures !== undefined && q.optionFigures.length === q.options.length;
+
+    optionsEl.innerHTML = order
+      .map((oi, pos) => {
+        let cls = 'option';
+        if (answered) {
+          if (oi === q.correct) cls += ' correct';
+          else if (oi === sel) cls += ' wrong';
+        } else if (oi === sel) cls += ' selected';
+        const fig = hasFig ? `<span class="opt-fig">${q.optionFigures![oi]}</span>` : '';
+        const label = q.options[oi] ? `<span class="opt-text">${escapeHtml(q.options[oi])}</span>` : '';
+        return `<button class="${cls}" data-idx="${oi}" type="button" ${answered ? 'disabled' : ''}>
+          <b>${LETTERS[pos]})</b><span class="opt-body">${fig}${label}</span>
+        </button>`;
+      })
+      .join('');
+
+    optionsEl.querySelectorAll('button').forEach((b) =>
+      b.addEventListener('click', () => {
+        if (answers[current] !== undefined) return;
+        answers[current] = Number(b.dataset.idx);
+        render();
+      }),
+    );
+  }
+
+  function renderExplanation() {
+    const q = questions[current];
+    const sel = answers[current];
+    if (sel === undefined) {
+      explanationEl.className = 'explanation hidden';
+      explanationEl.innerHTML = '';
+      return;
+    }
+    const ok = sel === q.correct;
+    explanationEl.className = `explanation ${ok ? 'ok' : 'ko'}`;
+    explanationEl.innerHTML = `<b>${ok ? '✓ Correcto' : '✗ Incorrecto'}</b><span>${escapeHtml(q.explanation)}</span>`;
+  }
+
+  function renderFooter() {
+    prevBtn.disabled = current === 0;
+    nextBtn.disabled = current === questions.length - 1;
+    nextBtn.textContent = current === questions.length - 1 ? 'Última →' : 'Siguiente →';
+  }
+
+  function animateCard() {
+    questionEl.classList.remove('anim');
+    optionsEl.classList.remove('anim');
+    void questionEl.offsetWidth;
+    questionEl.classList.add('anim');
+    optionsEl.classList.add('anim');
+  }
+
+  /* ------------------------------ Finalización ------------------------------- */
+  function requestFinish() {
+    const unanswered = answers.filter((a) => a === undefined).length;
+    if (unanswered > 0 && !window.confirm(`Te faltan ${unanswered} pregunta(s). ¿Finalizar de todas formas?`)) return;
+    finishQuiz();
+  }
+
+  function finishQuiz() {
+    stopTimer();
+    phase = 'results';
+    quizScreen.classList.add('hidden');
+    resultsScreen.classList.remove('hidden');
+    renderResults();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  function goHome() {
+    stopTimer();
+    phase = 'start';
+    resultsScreen.classList.add('hidden');
+    quizScreen.classList.add('hidden');
+    startScreen.classList.remove('hidden');
+    renderStart();
+    window.scrollTo(0, 0);
+  }
+
+  /* -------------------------------- Resultados ------------------------------- */
+  function scoreMessage(pct: number): string {
+    if (pct >= 90) return '¡Excelente! Estás muy bien preparado.';
+    if (pct >= 70) return '¡Muy bien! Sigue repasando los detalles.';
+    if (pct >= 50) return 'Vas por buen camino, pero te falta repasar.';
+    return 'No te rindas: repasa la guía y vuelve a intentarlo.';
+  }
+
+  function renderResults() {
+    const total = questions.length;
+    const correct = questions.filter((q, i) => answers[i] === q.correct).length;
+    const pct = total ? Math.round((correct / total) * 100) : 0;
+
+    scorePct.textContent = `${pct}%`;
+    scoreFrac.textContent = `${correct}/${total}`;
+    scoreMsg.textContent = scoreMessage(pct);
+
+    ringFg.style.strokeDasharray = String(RING_CIRC);
+    ringFg.style.strokeDashoffset = String(RING_CIRC);
+    requestAnimationFrame(() => {
+      ringFg.style.strokeDashoffset = String(RING_CIRC * (1 - pct / 100));
+    });
+
+    const cats: string[] = [];
+    for (const q of questions) if (!cats.includes(q.category)) cats.push(q.category);
+    breakdownEl.innerHTML = cats
+      .map((cat) => {
+        const idxs = questions.map((q, i) => (q.category === cat ? i : -1)).filter((i) => i >= 0);
+        const ok = idxs.filter((i) => answers[i] === questions[i].correct).length;
+        const p = idxs.length ? Math.round((ok / idxs.length) * 100) : 0;
+        return `<div class="breakdown-row">
+          <span>${escapeHtml(cat)}</span><b>${ok}/${idxs.length}</b>
+          <div class="bar"><i style="width:${p}%"></i></div>
+        </div>`;
+      })
+      .join('');
+
+    renderReview();
+    if (pct >= 70) confetti();
+  }
+
+  function renderReview() {
+    reviewEl.innerHTML = questions
+      .map((q, i) => {
+        const order = orders[i];
+        const sel = answers[i];
+        const ok = sel === q.correct;
+        const hasFig = q.optionFigures !== undefined && q.optionFigures.length === q.options.length;
+        const opts = order
+          .map((oi, pos) => {
+            let cls = 'option static';
+            if (oi === q.correct) cls += ' correct';
+            else if (oi === sel) cls += ' wrong';
+            const fig = hasFig ? `<span class="opt-fig">${q.optionFigures![oi]}</span>` : '';
+            const label = q.options[oi] ? `<span class="opt-text">${escapeHtml(q.options[oi])}</span>` : '';
+            return `<div class="${cls}"><b>${LETTERS[pos]})</b><span class="opt-body">${fig}${label}</span></div>`;
+          })
+          .join('');
+        const status = ok ? '✓ Correcto' : sel === undefined ? 'Sin responder' : '✗ Incorrecto';
+        return `<div class="card review-item ${ok ? 'ok' : 'ko'}">
+          <div class="review-head">
+            <span class="q-cat">${escapeHtml(q.category)}</span>
+            <span class="review-badge ${ok ? 'ok' : 'ko'}">${status}</span>
+          </div>
+          ${q.figure ? `<div class="fig-wrap small">${q.figure}</div>` : ''}
+          <p class="review-text">${escapeHtml(q.text).replace(/\n/g, '<br>')}</p>
+          <div class="review-opts">${opts}</div>
+          <p class="review-ex">${escapeHtml(q.explanation)}</p>
+        </div>`;
+      })
+      .join('');
+  }
+
+  /* --------------------------------- Confeti --------------------------------- */
+  function confetti() {
+    const canvas = document.createElement('canvas');
+    canvas.style.cssText = 'position:fixed;inset:0;width:100vw;height:100vh;pointer-events:none;z-index:9999';
+    document.body.appendChild(canvas);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = window.innerWidth * dpr;
+    canvas.height = window.innerHeight * dpr;
+    ctx.scale(dpr, dpr);
+    const colors = ['#4b2e8f', '#9b83e8', '#5fd394', '#ffb74d', '#ff8a80'];
+    const parts = Array.from({ length: 160 }, () => ({
+      x: Math.random() * window.innerWidth,
+      y: -20 - Math.random() * window.innerHeight * 0.3,
+      w: 6 + Math.random() * 6,
+      h: 8 + Math.random() * 8,
+      vy: 2 + Math.random() * 3,
+      vx: -1.5 + Math.random() * 3,
+      rot: Math.random() * Math.PI * 2,
+      vr: -0.1 + Math.random() * 0.2,
+      color: colors[Math.floor(Math.random() * colors.length)],
+    }));
+    let frames = 0;
+    function frame() {
+      if (!ctx) return;
+      ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+      for (const p of parts) {
+        p.x += p.vx;
+        p.y += p.vy;
+        p.rot += p.vr;
+        ctx.save();
+        ctx.translate(p.x, p.y);
+        ctx.rotate(p.rot);
+        ctx.fillStyle = p.color;
+        ctx.fillRect(-p.w / 2, -p.h / 2, p.w, p.h);
+        ctx.restore();
+      }
+      frames++;
+      if (frames < 240) requestAnimationFrame(frame);
+      else canvas.remove();
+    }
+    requestAnimationFrame(frame);
+  }
+
+  /* ------------------------------- Eventos ----------------------------------- */
+  startBtn.addEventListener('click', startQuiz);
+  prevBtn.addEventListener('click', () => {
+    if (current > 0) {
+      current--;
+      render();
+    }
+  });
+  nextBtn.addEventListener('click', () => {
+    if (current < questions.length - 1) {
+      current++;
+      render();
+    }
+  });
+  finishBtn.addEventListener('click', requestFinish);
+  retryBtn.addEventListener('click', startQuiz);
+  homeBtn.addEventListener('click', goHome);
+
+  document.addEventListener('keydown', (e) => {
+    if (phase === 'start') {
+      if (e.key === 'Enter' && !startBtn.disabled) startQuiz();
+      return;
+    }
+    if (phase !== 'quiz') return;
+
+    const key = e.key.toLowerCase();
+    if (['1', '2', '3', '4', '5', '6'].includes(key)) {
+      const pos = Number(key) - 1;
+      const order = orders[current];
+      if (pos < order.length && answers[current] === undefined) {
+        answers[current] = order[pos];
+        render();
+      }
+    } else if (['a', 'b', 'c', 'd', 'e', 'f'].includes(key)) {
+      const pos = LETTERS.indexOf(key);
+      const order = orders[current];
+      if (pos >= 0 && pos < order.length && answers[current] === undefined) {
+        answers[current] = order[pos];
+        render();
+      }
+    } else if (key === 'arrowright') {
+      if (current < questions.length - 1) {
+        current++;
+        render();
+      }
+    } else if (key === 'arrowleft') {
+      if (current > 0) {
+        current--;
+        render();
+      }
+    } else if (key === 'enter') {
+      if (current < questions.length - 1) {
+        current++;
+        render();
+      } else {
+        requestFinish();
+      }
+    }
+  });
+
+  /* --------------------------------- Inicio ---------------------------------- */
+  renderStart();
+</script>
